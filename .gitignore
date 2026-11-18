@@ -1,0 +1,12 @@
+# secrets & local data
+backend/.env
+backend/.data/
+# python
+backend/.venv/
+__pycache__/
+.pytest_cache/
+# node
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.DS_Store
