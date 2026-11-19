@@ -7,7 +7,14 @@ from pydantic import BaseModel
 
 from . import config, strava, tempo
 from .matcher import Plan, PlanOptions, Track, plan_playlist
-from .workout import RunnerProfile, Segment, finalize, parse_workout_text, segments_from_laps
+from .workout import (
+    RunnerProfile,
+    Segment,
+    finalize,
+    parse_workout_text,
+    profile_from_activities,
+    segments_from_laps,
+)
 
 app = FastAPI(title="Tempo Run")
 
@@ -89,6 +96,18 @@ async def strava_activities():
         }
         for a in data
     ]
+
+
+@app.get("/api/strava/profile")
+async def strava_profile(unit: str = "mi"):
+    """Running profile (easy pace, cadence) estimated from recent runs."""
+    if unit not in ("mi", "km"):
+        raise HTTPException(422, "unit must be mi or km")
+    status, data = await strava.get("/athlete/activities", await _token(), per_page=60)
+    if status != 200:
+        raise HTTPException(status, data)
+    profile, runs = profile_from_activities(data, unit)
+    return {"profile": profile, "runs_used": runs}
 
 
 class LapsRequest(BaseModel):

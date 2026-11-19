@@ -256,3 +256,39 @@ def segments_from_laps(laps: list[dict], p: RunnerProfile, use_strava_cadence: b
             seg.cadence, seg.cadence_source = round(spm, 1), "strava"
         segs.append(seg)
     return finalize(segs, p)
+
+
+# --------------------------------------------------------------- profile from history
+def profile_from_activities(activities: list[dict], unit: str = "mi") -> tuple[RunnerProfile, int]:
+    """Estimate a runner's cadence-vs-pace profile from recent Strava runs that
+    recorded cadence. Returns (profile, number of runs used)."""
+    pts = []
+    for a in activities:
+        kind = (a.get("sport_type") or a.get("type") or "").lower()
+        speed, cad = a.get("average_speed") or 0, a.get("average_cadence") or 0
+        if "run" not in kind or speed <= 1.5 or not cad or (a.get("distance") or 0) < 1000:
+            continue
+        spm = cad * 2 if cad < 120 else cad
+        pts.append((METERS_PER[unit] / speed, spm))
+    base = RunnerProfile(unit=unit, easy_pace_s=630 if unit == "mi" else 391)
+    if len(pts) < 3:
+        return base, len(pts)
+    paces = sorted(p for p, _ in pts)
+    easy_pace = paces[int(len(paces) * 0.7)]  # most runs are easy; take a slower-than-median pace
+    n = len(pts)
+    mp, mc = sum(p for p, _ in pts) / n, sum(c for _, c in pts) / n
+    var = sum((p - mp) ** 2 for p, _ in pts)
+    gain = base.cadence_gain
+    if var / n > 20**2:  # enough pace spread to measure how cadence changes
+        slope = sum((p - mp) * (c - mc) for p, c in pts) / var  # spm per second of pace
+        gain = max(2.0, min(20.0, -slope * 60))
+    easy_cad = mc + (easy_pace - mp) * (-gain / 60)
+    return (
+        RunnerProfile(
+            unit=unit,
+            easy_pace_s=round(easy_pace),
+            easy_cadence=round(max(140, min(195, easy_cad)), 1),
+            cadence_gain=round(gain, 1),
+        ),
+        n,
+    )

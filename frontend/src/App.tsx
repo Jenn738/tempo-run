@@ -1,21 +1,14 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { api, type AppConfig } from "./api";
 import * as spotify from "./spotify";
+import { clock, distance } from "./format";
 import type { Plan, PlanOptions, RunnerProfile, Segment, Track } from "./types";
-import WorkoutPanel, { type WorkoutSource } from "./components/WorkoutPanel";
-import MusicPanel, { type MusicSettings } from "./components/MusicPanel";
-import PlanView from "./components/PlanView";
-
-export const SAMPLE_WORKOUT = `Warm-Up
-0.5mi at a conversational pace
-No faster than 10:25/mi
-Session (2 - 4)
-0.5mi at 9:45/mi
-1mi at 9:05/mi
-1mi at 8:55/mi
-90s walking rest
-Cool Down
-0.5mi at a conversational pace`;
+import Step from "./components/Step";
+import WorkoutStep, { type ProfileOrigin, type WorkoutSource } from "./components/WorkoutStep";
+import MusicStep, { type MusicSettings } from "./components/MusicStep";
+import PlaylistStep from "./components/PlaylistStep";
+import Logo from "./components/Logo";
+import { SpotifyIcon, StravaIcon } from "./components/BrandIcons";
 
 function stored<T>(key: string, fallback: T): T {
   try {
@@ -29,7 +22,7 @@ function store(key: string, v: unknown) {
   try {
     localStorage.setItem(key, JSON.stringify(v));
   } catch {
-    /* ignore */
+    /* storage unavailable */
   }
 }
 
@@ -42,22 +35,41 @@ const DEFAULT_OPTIONS: PlanOptions = {
   merge_under_s: 150,
   seed: 1,
 };
-const DEFAULT_MUSIC: MusicSettings = { liked: true, playlists: true, discover: true, genres: "" };
+const DEFAULT_MUSIC: MusicSettings = { liked: true, playlists: true, discover: false, genres: "" };
+
+enum S {
+  Accounts,
+  Workout,
+  Music,
+  Playlist,
+}
 
 export default function App() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [me, setMe] = useState<spotify.Me | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [active, setActive] = useState<S>(S.Accounts);
+  const [reached, setReached] = useState<S>(S.Accounts);
+  const go = (s: S) => {
+    setActive(s);
+    setReached((r) => Math.max(r, s));
+  };
 
-  const [profile, setProfile] = useState<RunnerProfile>(() => stored("tempo-run.profile", DEFAULT_PROFILE));
-  const [source, setSource] = useState<WorkoutSource>({ kind: "text", text: SAMPLE_WORKOUT });
+  const [profile, setProfileRaw] = useState<RunnerProfile>(() => stored("tempo-run.profile", DEFAULT_PROFILE));
+  const [profileOrigin, setProfileOrigin] = useState<ProfileOrigin>(() =>
+    stored("tempo-run.profileOrigin", { kind: "default" } as ProfileOrigin),
+  );
+  const setProfile = (p: RunnerProfile) => {
+    setProfileRaw(p);
+    setProfileOrigin({ kind: "manual" });
+  };
+  const [source, setSource] = useState<WorkoutSource>({ kind: "text", text: "" });
   const [segments, setSegments] = useState<Segment[]>([]);
   const [workoutError, setWorkoutError] = useState<string | null>(null);
 
   const [music, setMusic] = useState<MusicSettings>(() => stored("tempo-run.music", DEFAULT_MUSIC));
   const [pool, setPool] = useState<Track[]>([]);
-  const [loadingMusic, setLoadingMusic] = useState<string | null>(null);
+  const [loading, setLoading] = useState<string | null>(null);
   const [musicError, setMusicError] = useState<string | null>(null);
 
   const [options, setOptions] = useState<PlanOptions>(() => ({ ...stored("tempo-run.options", DEFAULT_OPTIONS), seed: 1 }));
@@ -65,73 +77,93 @@ export default function App() {
   const [planError, setPlanError] = useState<string | null>(null);
 
   useEffect(() => store("tempo-run.profile", profile), [profile]);
+  useEffect(() => store("tempo-run.profileOrigin", profileOrigin), [profileOrigin]);
   useEffect(() => store("tempo-run.music", music), [music]);
   useEffect(() => store("tempo-run.options", options), [options]);
 
-  // boot: config, finish Spotify login, Strava redirect message
+  // boot: config, finish Spotify login, Strava redirect
   useEffect(() => {
     (async () => {
       try {
         const c = await api.config();
         setCfg(c);
         spotify.setClientId(c.spotifyClientId);
-        const params = new URLSearchParams(window.location.search);
-        const strava = params.get("strava");
-        if (strava) {
-          setToast(strava === "connected" ? "Strava connected" : "Strava login didn't finish");
-          window.history.replaceState({}, "", "/");
+        if (new URLSearchParams(window.location.search).has("strava")) window.history.replaceState({}, "", "/");
+        if (c.spotifyClientId && (await spotify.handleRedirect())) {
+          setMe(await spotify.getMe());
+          go(S.Workout);
         }
-        if (c.spotifyClientId && (await spotify.handleRedirect())) setMe(await spotify.getMe());
       } catch (e) {
         if (e instanceof spotify.SpotifyError && e.status === 403) {
-          setFatal(
-            "Spotify refused access (403). In development mode, your Spotify account must be added under User Management in your app's dashboard.",
-          );
           spotify.logout();
-        } else setFatal(String((e as Error).message || e));
+          setFatal(
+            "Spotify said this account isn't allowed yet. Add your Spotify email under User Management in your app on developer.spotify.com, then reload.",
+          );
+        } else setFatal((e as Error).message);
       }
     })();
   }, []);
 
+  // Personal BPM profile from recent Strava runs (unless the runner set it by hand)
   useEffect(() => {
-    if (!toast) return;
-    const t = setTimeout(() => setToast(null), 3500);
-    return () => clearTimeout(t);
-  }, [toast]);
+    if (!cfg?.stravaConnected || profileOrigin.kind === "manual") return;
+    api
+      .stravaProfile(profile.unit)
+      .then(({ profile: p, runs_used }) => {
+        if (runs_used >= 3) {
+          setProfileRaw({ ...p, walk_cadence: profile.walk_cadence });
+          setProfileOrigin({ kind: "strava", runs: runs_used });
+        }
+      })
+      .catch(() => {});
+  }, [cfg?.stravaConnected, profile.unit]); // eslint-disable-line react-hooks/exhaustive-deps
 
-  // workout → segments (re-run when the runner profile changes)
+  // workout → steps
   useEffect(() => {
-    const t = setTimeout(async () => {
+    if (source.kind === "text" && !source.text.trim()) {
+      setSegments([]);
+      setWorkoutError(null);
+      return;
+    }
+    let stale = false;
+    (async () => {
       try {
-        setWorkoutError(null);
-        if (source.kind === "text") setSegments(await api.parse(source.text, profile));
-        else setSegments(await api.stravaSegments(source.id, profile, source.useCadence));
+        const segs =
+          source.kind === "text"
+            ? await api.parse(source.text, profile)
+            : await api.stravaSegments(source.id, profile, profileOrigin.kind !== "manual");
+        if (!stale) {
+          setSegments(segs);
+          setWorkoutError(null);
+        }
       } catch (e) {
-        setWorkoutError((e as Error).message);
-        setSegments([]);
+        if (!stale) {
+          setWorkoutError((e as Error).message);
+          setSegments([]);
+        }
       }
-    }, 300);
-    return () => clearTimeout(t);
-  }, [source, profile]);
+    })();
+    return () => {
+      stale = true;
+    };
+  }, [source, profile]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const editSegment = (i: number, patch: Partial<Segment>) =>
     setSegments((segs) => segs.map((s, k) => (k === i ? { ...s, ...patch } : s)));
 
-  // music pool
-  const loadMusic = useCallback(async () => {
+  // music → pool (with BPM)
+  const build = useCallback(async () => {
     if (!me) return;
     setMusicError(null);
     try {
       const byId = new Map<string, Track>();
       const add = (ts: Track[]) => ts.forEach((t) => !byId.has(t.id) && byId.set(t.id, t));
-      if (music.liked) {
-        add(await spotify.likedSongs(1500, (n) => setLoadingMusic(`Reading liked songs… ${n}`)));
-      }
+      if (music.liked) add(await spotify.likedSongs(1500, (n) => setLoading(`Reading your liked songs… ${n}`)));
       if (music.playlists) {
-        setLoadingMusic("Finding your playlists…");
+        setLoading("Finding your playlists…");
         const lists = (await spotify.ownPlaylists(me)).slice(0, 40);
         for (const [i, pl] of lists.entries()) {
-          setLoadingMusic(`Reading your playlists… ${i + 1}/${lists.length}: ${pl.name}`);
+          setLoading(`Reading your playlists… ${i + 1} of ${lists.length}`);
           try {
             add(await spotify.playlistTracks(pl.id, 400));
           } catch (e) {
@@ -140,13 +172,14 @@ export default function App() {
         }
       }
       if (music.discover) {
-        setLoadingMusic("Searching Spotify for new songs by artists you like…");
+        setLoading("Finding new songs…");
         const genres = music.genres.split(",").map((g) => g.trim()).filter(Boolean);
         add(await spotify.discover([...byId.values()], genres));
       }
       const tracks = [...byId.values()];
+      if (!tracks.length) throw new Error("No songs found in the sources you picked.");
       for (let i = 0; i < tracks.length; i += 400) {
-        setLoadingMusic(`Looking up BPM… ${Math.min(i + 400, tracks.length)}/${tracks.length}`);
+        setLoading(`Checking song tempos… ${Math.min(i + 400, tracks.length)} of ${tracks.length}`);
         const tempos = await api.tempo(tracks.slice(i, i + 400).map((t) => t.id));
         for (const t of tracks.slice(i, i + 400)) {
           const f = tempos[t.id];
@@ -154,91 +187,165 @@ export default function App() {
         }
       }
       setPool(tracks);
+      setOptions((o) => ({ ...o, library_only: !music.discover }));
+      go(S.Playlist);
     } catch (e) {
       setMusicError((e as Error).message);
     } finally {
-      setLoadingMusic(null);
+      setLoading(null);
     }
   }, [me, music]);
 
-  // segments + pool + options → plan
-  const planReq = useRef(0);
+  // steps + pool + options → plan
+  const req = useRef(0);
   useEffect(() => {
-    if (!segments.length || !pool.length) {
-      setPlan(null);
-      return;
-    }
-    const id = ++planReq.current;
+    if (!segments.length || !pool.length) return setPlan(null);
+    const id = ++req.current;
     const t = setTimeout(async () => {
       try {
         const p = await api.plan(segments, pool, options);
-        if (id === planReq.current) {
+        if (id === req.current) {
           setPlan(p);
           setPlanError(null);
         }
       } catch (e) {
         setPlanError((e as Error).message);
       }
-    }, 200);
+    }, 150);
     return () => clearTimeout(t);
   }, [segments, pool, options]);
 
-  const workoutName = useMemo(() => (source.kind === "strava" ? source.name : "Progression Run"), [source]);
+  if (fatal) return <div className="page"><p className="error card-ish">{fatal}</p></div>;
+  if (!cfg) return <div className="page quiet">Loading…</div>;
 
-  if (fatal) return <div className="fatal card">{fatal}</div>;
-  if (!cfg) return <div className="boot">Loading…</div>;
+  const totalS = segments.reduce((a, s) => a + s.duration_s, 0);
+  const totalM = segments.reduce((a, s) => a + (s.distance_m ?? 0), 0);
+  const workoutName =
+    source.kind === "strava" ? source.name : `${distance(totalM, profile.unit) || clock(totalS)} run`;
+  const sources = [music.liked && "liked songs", music.playlists && "your playlists", music.discover && "new songs"]
+    .filter(Boolean)
+    .join(", ");
 
   return (
-    <div className="app">
-      <header className="top">
-        <div className="brand">
-          <span className="logo">♪</span>
-          <div>
-            <h1>Tempo Run</h1>
-            <p>Playlists that match your workout's pace, step by step.</p>
-          </div>
-        </div>
-        <div className="accounts">
-          {me ? (
-            <button className="pill spotify on" onClick={() => (spotify.logout(), setMe(null), setPool([]))} title="Log out of Spotify">
-              ● {me.display_name}
-            </button>
-          ) : cfg.spotifyClientId ? (
-            <button className="pill spotify" onClick={() => spotify.login()}>
-              Connect Spotify
-            </button>
-          ) : (
-            <span className="pill warn">Add SPOTIFY_CLIENT_ID to backend/.env</span>
-          )}
-        </div>
+    <div className="page">
+      <header className="hero">
+        <Logo />
+        <p>Convert your workout into a playlist whose beat matches every step of your run</p>
       </header>
 
-      {toast && <div className="toast">{toast}</div>}
-
-      <main className="grid">
-        <div className="col">
-          <WorkoutPanel
-            cfg={cfg}
-            source={source}
-            setSource={setSource}
-            profile={profile}
-            setProfile={setProfile}
-            segments={segments}
-            editSegment={editSegment}
-            error={workoutError}
+      <Step
+        n={1}
+        title="Connect"
+        active={active === S.Accounts}
+        done={!!me}
+        summary={["Spotify", cfg.stravaConnected && "Strava"].filter(Boolean).join(" · ")}
+        onEdit={() => setActive(S.Accounts)}
+      >
+        <div className="accounts">
+          <Account
+            icon={<SpotifyIcon />}
+            name="Spotify"
+            required
+            hint="Reads your music and saves the playlist"
+            connected={me ? me.display_name : null}
+            action={
+              me ? (
+                <button className="secondary small" onClick={() => (spotify.logout(), setMe(null), setPool([]))}>
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  className="spotify small"
+                  disabled={!cfg.spotifyClientId}
+                  title={cfg.spotifyClientId ? undefined : "Needs SPOTIFY_CLIENT_ID in backend/.env"}
+                  onClick={() => spotify.login()}
+                >
+                  Connect
+                </button>
+              )
+            }
           />
-          <MusicPanel
-            connected={!!me}
-            settings={music}
-            setSettings={setMusic}
-            pool={pool}
-            loading={loadingMusic}
-            error={musicError}
-            onLoad={loadMusic}
+          <Account
+            icon={<StravaIcon />}
+            name="Strava"
+            hint="Import runs and personalise your BPM"
+            connected={cfg.stravaConnected ? "Connected" : null}
+            action={
+              cfg.stravaConnected ? (
+                <button
+                  className="secondary small"
+                  onClick={async () => {
+                    await api.stravaDisconnect();
+                    setCfg({ ...cfg, stravaConnected: false });
+                  }}
+                >
+                  Disconnect
+                </button>
+              ) : (
+                <button
+                  className="strava small"
+                  disabled={!cfg.stravaConfigured}
+                  title={cfg.stravaConfigured ? undefined : "Needs one-time Strava app setup (see README)"}
+                  onClick={() => (window.location.href = "/api/strava/login")}
+                >
+                  Connect
+                </button>
+              )
+            }
           />
         </div>
-        <div className="col wide">
-          <PlanView
+        <button className="primary" disabled={!me} onClick={() => go(S.Workout)}>
+          Continue
+        </button>
+      </Step>
+
+      {reached >= S.Workout && (
+        <Step
+          n={2}
+          title="Workout"
+          active={active === S.Workout}
+          done={segments.length > 0}
+          summary={segments.length ? `${workoutName} · ${clock(totalS)} · ${segments.length} steps` : "Not set"}
+          onEdit={() => setActive(S.Workout)}
+        >
+          <WorkoutStep
+            stravaConnected={cfg.stravaConnected}
+            source={source}
+            setSource={setSource}
+            segments={segments}
+            editSegment={editSegment}
+            profile={profile}
+            setProfile={setProfile}
+            profileOrigin={profileOrigin}
+            error={workoutError}
+            onContinue={() => go(reached >= S.Playlist ? S.Playlist : S.Music)}
+          />
+        </Step>
+      )}
+
+      {reached >= S.Music && (
+        <Step
+          n={3}
+          title="Music"
+          active={active === S.Music}
+          done={pool.length > 0}
+          summary={pool.length ? `${pool.length} songs from ${sources}` : sources}
+          onEdit={() => setActive(S.Music)}
+        >
+          <MusicStep settings={music} setSettings={setMusic} loading={loading} error={musicError} onBuild={build} />
+        </Step>
+      )}
+
+      {reached >= S.Playlist && me && (
+        <Step
+          n={4}
+          title="Your playlist"
+          active={active === S.Playlist}
+          done={!!plan}
+          summary={plan ? `${plan.blocks.reduce((a, b) => a + b.picks.length, 0)} songs` : ""}
+          onEdit={() => setActive(S.Playlist)}
+        >
+          <PlaylistStep
             me={me}
             plan={plan}
             error={planError}
@@ -247,10 +354,37 @@ export default function App() {
             options={options}
             setOptions={setOptions}
             workoutName={workoutName}
-            unit={profile.unit}
           />
+        </Step>
+      )}
+    </div>
+  );
+}
+
+function Account(props: {
+  icon: ReactNode;
+  name: string;
+  hint: string;
+  required?: boolean;
+  connected: string | null;
+  action: ReactNode;
+}) {
+  return (
+    <div className={`account ${props.connected ? "on" : ""}`}>
+      {props.icon}
+      <div className="acct-text">
+        <div className="acct-name">
+          {props.name}
+          {props.required && (
+            <span className="req" title="Required">
+              *
+            </span>
+          )}
+          {props.connected && <span className="acct-status">● {props.connected}</span>}
         </div>
-      </main>
+        <div className="quiet">{props.hint}</div>
+      </div>
+      {props.action}
     </div>
   );
 }

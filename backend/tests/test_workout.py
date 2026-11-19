@@ -61,3 +61,25 @@ def test_strava_laps_use_recorded_cadence():
     assert segs[0].cadence == 162 and segs[0].cadence_source == "strava"
     assert segs[2].kind == "rest"
     assert segs[3].cadence_source == "pace"
+
+
+def test_profile_from_strava_history():
+    from app.workout import profile_from_activities
+
+    # cadence rises 8 spm per minute/mi faster; easy runs ~10:30/mi at 162
+    def run(pace_s, spm):
+        return {"type": "Run", "distance": 5000, "average_speed": 1609.344 / pace_s, "average_cadence": spm / 2}
+
+    acts = [run(630, 162), run(640, 160.7), run(600, 166), run(545, 173.3), run(660, 158), {"type": "Ride"}]
+    prof, n = profile_from_activities(acts, "mi")
+    assert n == 5
+    assert abs(prof.cadence_gain - 8) < 0.5
+    assert 625 <= prof.easy_pace_s <= 645
+    assert abs(prof.easy_cadence - 161.5) < 2
+
+
+def test_profile_falls_back_without_cadence():
+    from app.workout import profile_from_activities
+
+    prof, n = profile_from_activities([{"type": "Run", "distance": 5000, "average_speed": 3}], "mi")
+    assert n == 0 and prof.easy_cadence == 162

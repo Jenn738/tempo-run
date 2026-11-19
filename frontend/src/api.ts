@@ -35,6 +35,8 @@ export const api = {
   stravaActivities: () => call<StravaActivity[]>("/api/strava/activities"),
   stravaSegments: (id: number, profile: RunnerProfile, use_strava_cadence: boolean) =>
     call<Segment[]>(`/api/strava/activities/${id}/segments`, { profile, use_strava_cadence }),
+  stravaProfile: (unit: string) =>
+    call<{ profile: RunnerProfile; runs_used: number }>(`/api/strava/profile?unit=${unit}`),
   stravaDisconnect: () => call<{ ok: boolean }>("/api/strava/disconnect", {}),
   tempo: (ids: string[]) =>
     call<Record<string, { tempo: number; energy: number | null } | null>>("/api/tempo", { ids }),
