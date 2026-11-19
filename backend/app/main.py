@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from . import config, strava, tempo
+from . import access, config, strava, tempo
 from .matcher import Plan, PlanOptions, Track, plan_playlist
 from .workout import (
     RunnerProfile,
@@ -46,7 +46,28 @@ async def get_config(request: Request, response: Response):
         "spotifyClientId": config.SPOTIFY_CLIENT_ID,
         "stravaConfigured": strava.configured(),
         "stravaConnected": (await strava.access_token(sid)) is not None,
+        "accessRequests": access.enabled(),
     }
+
+
+class AccessRequest(BaseModel):
+    email: str
+    name: str = ""
+
+
+@app.post("/api/access-request")
+async def request_access(req: AccessRequest, request: Request, response: Response):
+    """A friend whose Spotify account isn't allowlisted asks the owner to add it."""
+    if not access.enabled():
+        raise HTTPException(503, "Access requests aren't set up yet.")
+    email, name = req.email.strip(), req.name.strip()[:60]
+    if not access.valid_email(email):
+        raise HTTPException(422, "That doesn't look like an email address.")
+    if not access.allow(session_id(request, response)):
+        raise HTTPException(429, "You've already sent a request. Try again later.")
+    if not await access.send(email, name):
+        raise HTTPException(502, "Couldn't send your request. Try again in a bit.")
+    return {"ok": True}
 
 
 # ------------------------------------------------------------------ workout

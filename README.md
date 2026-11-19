@@ -39,6 +39,8 @@ That way the beat speeds up exactly when the workout does.
 5. Copy the **Client ID**. No client secret is needed (the app logs in with PKCE).
 
 ### 2. Strava app (optional, for importing runs)
+Strava requires a **Strava subscription** on the account that registers the API app.
+
 1. Go to <https://www.strava.com/settings/api> and create an app.
 2. **Authorization Callback Domain:** `127.0.0.1`
 3. Copy the **Client ID** and **Client Secret**.

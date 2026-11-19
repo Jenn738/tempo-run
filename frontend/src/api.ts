@@ -24,6 +24,7 @@ export interface AppConfig {
   spotifyClientId: string;
   stravaConfigured: boolean;
   stravaConnected: boolean;
+  accessRequests: boolean;
 }
 
 export const api = {
@@ -37,6 +38,7 @@ export const api = {
     call<Segment[]>(`/api/strava/activities/${id}/segments`, { profile, use_strava_cadence }),
   stravaProfile: (unit: string) =>
     call<{ profile: RunnerProfile; runs_used: number }>(`/api/strava/profile?unit=${unit}`),
+  requestAccess: (email: string, name: string) => call<{ ok: boolean }>("/api/access-request", { email, name }),
   stravaDisconnect: () => call<{ ok: boolean }>("/api/strava/disconnect", {}),
   tempo: (ids: string[]) =>
     call<Record<string, { tempo: number; energy: number | null } | null>>("/api/tempo", { ids }),

@@ -67,13 +67,35 @@ export function logout() {
   save(null);
 }
 
+export class SpotifyError extends Error {
+  constructor(
+    public status: number,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+/** The saved login can't be used any more; the user needs to connect again. */
+export class LoginExpired extends SpotifyError {
+  constructor() {
+    super(401, "Your Spotify login expired. Connect again.");
+  }
+}
+
 async function tokenRequest(body: Record<string, string>) {
   const res = await fetch("https://accounts.spotify.com/api/token", {
     method: "POST",
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body: new URLSearchParams({ client_id: clientId, ...body }),
   });
-  if (!res.ok) throw new Error(`Spotify login failed (${res.status}): ${await res.text()}`);
+  if (!res.ok) {
+    if (body.grant_type === "refresh_token" && (res.status === 400 || res.status === 401)) {
+      save(null); // revoked, rotated or otherwise unusable: forget it
+      throw new LoginExpired();
+    }
+    throw new SpotifyError(res.status, `Spotify login failed (${res.status}): ${await res.text()}`);
+  }
   const j = await res.json();
   const prev = load();
   const t: Tokens = {
@@ -85,29 +107,44 @@ async function tokenRequest(body: Record<string, string>) {
   return t;
 }
 
-/** Call on page load: finishes a login redirect if there is one. */
-export async function handleRedirect(): Promise<boolean> {
-  const url = new URL(window.location.href);
-  if (url.pathname !== "/callback") return !!load();
-  const code = url.searchParams.get("code");
-  const verifier = sessionStorage.getItem("tempo-run.verifier");
-  window.history.replaceState({}, "", "/");
-  if (!code || !verifier) return false;
-  await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: redirectUri(), code_verifier: verifier });
-  return true;
+// Spotify rotates refresh tokens: each one works once. Share a single refresh
+// between concurrent callers so a second request doesn't spend a dead token.
+let refreshing: Promise<Tokens> | null = null;
+function refresh(): Promise<Tokens> {
+  const t = load();
+  if (!t?.refresh_token) {
+    save(null);
+    return Promise.reject(new LoginExpired());
+  }
+  refreshing ??= tokenRequest({ grant_type: "refresh_token", refresh_token: t.refresh_token }).finally(() => {
+    refreshing = null;
+  });
+  return refreshing;
+}
+
+/** Call on page load: finishes a login redirect if there is one. Runs once
+ * even if called twice (React StrictMode), since an auth code works once. */
+let redirectResult: Promise<boolean> | null = null;
+export function handleRedirect(): Promise<boolean> {
+  redirectResult ??= (async () => {
+    const url = new URL(window.location.href);
+    if (url.pathname !== "/callback") return !!load();
+    const code = url.searchParams.get("code");
+    const verifier = sessionStorage.getItem("tempo-run.verifier");
+    window.history.replaceState({}, "", "/");
+    if (!code || !verifier) return false;
+    sessionStorage.removeItem("tempo-run.verifier");
+    await tokenRequest({ grant_type: "authorization_code", code, redirect_uri: redirectUri(), code_verifier: verifier });
+    return true;
+  })();
+  return redirectResult;
 }
 
 async function token(): Promise<string> {
   let t = load();
-  if (!t) throw new Error("Not logged in to Spotify");
-  if (Date.now() > t.expires_at) t = await tokenRequest({ grant_type: "refresh_token", refresh_token: t.refresh_token });
+  if (!t) throw new LoginExpired();
+  if (Date.now() > t.expires_at) t = await refresh();
   return t.access_token;
-}
-
-export class SpotifyError extends Error {
-  constructor(public status: number, message: string) {
-    super(message);
-  }
 }
 
 export async function sp<T = any>(path: string, init: RequestInit = {}): Promise<T> {
@@ -123,8 +160,7 @@ export async function sp<T = any>(path: string, init: RequestInit = {}): Promise
       continue;
     }
     if (res.status === 401 && attempt === 0) {
-      const t = load();
-      if (t) await tokenRequest({ grant_type: "refresh_token", refresh_token: t.refresh_token });
+      await refresh(); // access token rejected early: renew once, then retry
       continue;
     }
     if (!res.ok) {

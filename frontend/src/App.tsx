@@ -9,6 +9,7 @@ import MusicStep, { type MusicSettings } from "./components/MusicStep";
 import PlaylistStep from "./components/PlaylistStep";
 import Logo from "./components/Logo";
 import { SpotifyIcon, StravaIcon } from "./components/BrandIcons";
+import RequestAccess from "./components/RequestAccess";
 
 function stored<T>(key: string, fallback: T): T {
   try {
@@ -48,6 +49,10 @@ export default function App() {
   const [cfg, setCfg] = useState<AppConfig | null>(null);
   const [fatal, setFatal] = useState<string | null>(null);
   const [me, setMe] = useState<spotify.Me | null>(null);
+  const [notice, setNotice] = useState<string | null>(null);
+  const [notAllowed, setNotAllowed] = useState(false);
+  const [stravaError, setStravaError] = useState<string | null>(null);
+  const [showStravaSetup, setShowStravaSetup] = useState(false);
   const [active, setActive] = useState<S>(S.Accounts);
   const [reached, setReached] = useState<S>(S.Accounts);
   const go = (s: S) => {
@@ -88,17 +93,21 @@ export default function App() {
         const c = await api.config();
         setCfg(c);
         spotify.setClientId(c.spotifyClientId);
-        if (new URLSearchParams(window.location.search).has("strava")) window.history.replaceState({}, "", "/");
+        const stravaResult = new URLSearchParams(window.location.search).get("strava");
+        if (stravaResult) {
+          if (stravaResult !== "connected") setStravaError("Strava login didn't finish. Try connecting again.");
+          window.history.replaceState({}, "", "/");
+        }
         if (c.spotifyClientId && (await spotify.handleRedirect())) {
           setMe(await spotify.getMe());
           go(S.Workout);
         }
       } catch (e) {
-        if (e instanceof spotify.SpotifyError && e.status === 403) {
-          spotify.logout();
-          setFatal(
-            "Spotify said this account isn't allowed yet. Add your Spotify email under User Management in your app on developer.spotify.com, then reload.",
-          );
+        if (e instanceof spotify.LoginExpired) {
+          setNotice(e.message);
+        } else if (e instanceof spotify.SpotifyError && e.status === 403) {
+          spotify.logout(); // logged in, but this account isn't on the app's allowlist
+          setNotAllowed(true);
         } else setFatal((e as Error).message);
       }
     })();
@@ -190,7 +199,11 @@ export default function App() {
       setOptions((o) => ({ ...o, library_only: !music.discover }));
       go(S.Playlist);
     } catch (e) {
-      setMusicError((e as Error).message);
+      if (e instanceof spotify.LoginExpired) {
+        setMe(null);
+        setNotice(e.message);
+        setActive(S.Accounts);
+      } else setMusicError((e as Error).message);
     } finally {
       setLoading(null);
     }
@@ -265,10 +278,16 @@ export default function App() {
               )
             }
           />
+          {notAllowed && !me && <RequestAccess enabled={cfg.accessRequests} />}
+          {notice && !me && !notAllowed && <p className="login-error">{notice}</p>}
           <Account
             icon={<StravaIcon />}
             name="Strava"
-            hint="Import runs and personalise your BPM"
+            hint={
+              cfg.stravaConfigured
+                ? "Log in with Strava to import runs and personalise your BPM"
+                : "Import runs and personalise your BPM"
+            }
             connected={cfg.stravaConnected ? "Connected" : null}
             action={
               cfg.stravaConnected ? (
@@ -281,18 +300,19 @@ export default function App() {
                 >
                   Disconnect
                 </button>
-              ) : (
-                <button
-                  className="strava small"
-                  disabled={!cfg.stravaConfigured}
-                  title={cfg.stravaConfigured ? undefined : "Needs one-time Strava app setup (see README)"}
-                  onClick={() => (window.location.href = "/api/strava/login")}
-                >
+              ) : cfg.stravaConfigured ? (
+                <button className="strava small" onClick={() => (window.location.href = "/api/strava/login")}>
                   Connect
+                </button>
+              ) : (
+                <button className="secondary small" onClick={() => setShowStravaSetup((v) => !v)} aria-expanded={showStravaSetup}>
+                  {showStravaSetup ? "Hide" : "Set up"}
                 </button>
               )
             }
           />
+          {stravaError && !cfg.stravaConnected && <p className="login-error">{stravaError}</p>}
+          {showStravaSetup && !cfg.stravaConfigured && <StravaSetup />}
         </div>
         <button className="primary" disabled={!me} onClick={() => go(S.Workout)}>
           Continue
@@ -357,6 +377,37 @@ export default function App() {
           />
         </Step>
       )}
+    </div>
+  );
+}
+
+function StravaSetup() {
+  return (
+    <div className="setup">
+      <p>
+        Strava needs a one-time app registration before anyone can log in. Registering requires a{" "}
+        <a href="https://www.strava.com/subscribe" target="_blank" rel="noreferrer">
+          Strava subscription
+        </a>{" "}
+        on the account that creates the app. Then it takes about two minutes:
+      </p>
+      <ol>
+        <li>
+          Go to{" "}
+          <a href="https://www.strava.com/settings/api" target="_blank" rel="noreferrer">
+            strava.com/settings/api
+          </a>{" "}
+          and create an app (any name and website).
+        </li>
+        <li>
+          Set <b>Authorization Callback Domain</b> to <code>{window.location.hostname}</code>.
+        </li>
+        <li>
+          Copy the <b>Client ID</b> and <b>Client Secret</b> into <code>backend/.env</code> as{" "}
+          <code>STRAVA_CLIENT_ID</code> and <code>STRAVA_CLIENT_SECRET</code>.
+        </li>
+        <li>Restart the backend and reload this page. Connect will then take you to Strava to log in.</li>
+      </ol>
     </div>
   );
 }
