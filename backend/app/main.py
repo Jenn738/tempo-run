@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import FastAPI, HTTPException
+import secrets
+
+from fastapi import FastAPI, HTTPException, Request, Response
 from fastapi.responses import FileResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -18,13 +20,32 @@ from .workout import (
 
 app = FastAPI(title="Tempo Run")
 
+SESSION_COOKIE = "tr_sid"
+STATE_COOKIE = "tr_strava_state"
+
+
+def _set_cookie(resp: Response, name: str, value: str, max_age: int) -> None:
+    resp.set_cookie(
+        name, value, max_age=max_age, httponly=True, samesite="lax", secure=config.SECURE_COOKIES, path="/"
+    )
+
+
+def session_id(request: Request, response: Response) -> str:
+    """This browser's session id; issues one (as a cookie) on first visit."""
+    sid = request.cookies.get(SESSION_COOKIE)
+    if not sid or len(sid) < 32:
+        sid = secrets.token_urlsafe(32)
+        _set_cookie(response, SESSION_COOKIE, sid, 60 * 60 * 24 * 365)
+    return sid
+
 
 @app.get("/api/config")
-async def get_config():
+async def get_config(request: Request, response: Response):
+    sid = session_id(request, response)
     return {
         "spotifyClientId": config.SPOTIFY_CLIENT_ID,
         "stravaConfigured": strava.configured(),
-        "stravaConnected": (await strava.access_token()) is not None,
+        "stravaConnected": (await strava.access_token(sid)) is not None,
     }
 
 
@@ -55,34 +76,45 @@ def recalc(req: RecalcRequest):
 
 # ------------------------------------------------------------------ strava
 @app.get("/api/strava/login")
-def strava_login():
+def strava_login(request: Request):
     if not strava.configured():
         raise HTTPException(400, "Add STRAVA_CLIENT_ID and STRAVA_CLIENT_SECRET to backend/.env")
-    return RedirectResponse(strava.authorize_url())
+    state = secrets.token_urlsafe(24)
+    resp = RedirectResponse(strava.authorize_url(state))
+    session_id(request, resp)
+    _set_cookie(resp, STATE_COOKIE, state, 600)
+    return resp
 
 
 @app.get("/api/strava/callback")
-async def strava_callback(code: str | None = None, error: str | None = None):
-    ok = bool(code) and await strava.exchange_code(code)
-    return RedirectResponse(f"{config.FRONTEND_URL}/?strava={'connected' if ok else 'error'}")
+async def strava_callback(request: Request, code: str | None = None, state: str | None = None):
+    sid = request.cookies.get(SESSION_COOKIE)
+    expected = request.cookies.get(STATE_COOKIE)
+    ok = bool(code and sid and expected and state and secrets.compare_digest(state, expected))
+    ok = ok and await strava.exchange_code(sid, code)
+    resp = RedirectResponse(f"{config.FRONTEND_URL}/?strava={'connected' if ok else 'error'}")
+    resp.delete_cookie(STATE_COOKIE, path="/")
+    return resp
 
 
 @app.post("/api/strava/disconnect")
-def strava_disconnect():
-    strava.disconnect()
+def strava_disconnect(request: Request):
+    sid = request.cookies.get(SESSION_COOKIE)
+    if sid:
+        strava.disconnect(sid)
     return {"ok": True}
 
 
-async def _token() -> str:
-    tok = await strava.access_token()
+async def _token(request: Request) -> str:
+    tok = await strava.access_token(request.cookies.get(SESSION_COOKIE))
     if not tok:
         raise HTTPException(401, "Strava isn't connected")
     return tok
 
 
 @app.get("/api/strava/activities")
-async def strava_activities():
-    status, data = await strava.get("/athlete/activities", await _token(), per_page=30)
+async def strava_activities(request: Request):
+    status, data = await strava.get("/athlete/activities", await _token(request), per_page=30)
     if status != 200:
         raise HTTPException(status, data)
     return [
@@ -99,11 +131,11 @@ async def strava_activities():
 
 
 @app.get("/api/strava/profile")
-async def strava_profile(unit: str = "mi"):
+async def strava_profile(request: Request, unit: str = "mi"):
     """Running profile (easy pace, cadence) estimated from recent runs."""
     if unit not in ("mi", "km"):
         raise HTTPException(422, "unit must be mi or km")
-    status, data = await strava.get("/athlete/activities", await _token(), per_page=60)
+    status, data = await strava.get("/athlete/activities", await _token(request), per_page=60)
     if status != 200:
         raise HTTPException(status, data)
     profile, runs = profile_from_activities(data, unit)
@@ -116,8 +148,8 @@ class LapsRequest(BaseModel):
 
 
 @app.post("/api/strava/activities/{activity_id}/segments", response_model=list[Segment])
-async def strava_segments(activity_id: int, req: LapsRequest):
-    status, laps = await strava.get(f"/activities/{activity_id}/laps", await _token())
+async def strava_segments(activity_id: int, req: LapsRequest, request: Request):
+    status, laps = await strava.get(f"/activities/{activity_id}/laps", await _token(request))
     if status != 200:
         raise HTTPException(status, laps)
     return segments_from_laps(laps, req.profile, req.use_strava_cadence)

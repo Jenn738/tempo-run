@@ -11,7 +11,10 @@ STRAVA_CLIENT_ID = os.getenv("STRAVA_CLIENT_ID", "").strip()
 STRAVA_CLIENT_SECRET = os.getenv("STRAVA_CLIENT_SECRET", "").strip()
 FRONTEND_URL = os.getenv("FRONTEND_URL", "http://127.0.0.1:5173").rstrip("/")
 BACKEND_URL = os.getenv("BACKEND_URL", "http://127.0.0.1:8000").rstrip("/")
+# https in production: session cookies get the Secure flag
+SECURE_COOKIES = BACKEND_URL.startswith("https://")
 
-DATA_DIR = BACKEND_DIR / ".data"
-DATA_DIR.mkdir(exist_ok=True)
-FRONTEND_DIST = BACKEND_DIR.parent / "frontend" / "dist"
+# Point DATA_DIR at a persistent volume when hosting (Strava logins, BPM cache).
+DATA_DIR = Path(os.getenv("DATA_DIR", BACKEND_DIR / ".data"))
+DATA_DIR.mkdir(parents=True, exist_ok=True)
+FRONTEND_DIST = Path(os.getenv("FRONTEND_DIST", BACKEND_DIR.parent / "frontend" / "dist"))

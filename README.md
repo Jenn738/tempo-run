@@ -79,6 +79,31 @@ cd backend && .venv/bin/python -m pytest
 cd frontend && npm run typecheck
 ```
 
+## Hosting (you + friends)
+
+The app ships as one container (`Dockerfile`): the FastAPI backend serves the
+API *and* the built frontend, so it deploys as a single service on any host that
+runs Docker from a GitHub repo (Render, Railway, Fly.io…).
+
+1. **Deploy** the repo with its `Dockerfile`. Attach a small **persistent volume
+   at `/data`**; it holds Strava logins and the BPM cache.
+2. **Environment variables** on the host:
+   ```
+   SPOTIFY_CLIENT_ID=...
+   STRAVA_CLIENT_ID=...
+   STRAVA_CLIENT_SECRET=...
+   FRONTEND_URL=https://run.yoursite.com
+   BACKEND_URL=https://run.yoursite.com
+   ```
+3. **Domain:** add a CNAME for `run.yoursite.com` pointing at the host; it issues HTTPS.
+4. **Spotify dashboard:** add redirect URI `https://run.yoursite.com/callback`, and
+   add each friend's Spotify email under **User Management** (development-mode
+   apps only work for listed accounts).
+5. **Strava settings:** set the Authorization Callback Domain to `run.yoursite.com`.
+
+Each browser gets its own session cookie, so every friend connects their own
+Strava; Spotify logins stay in each person's browser.
+
 ## Tips & limits
 - **Play in order with shuffle off.** Spotify can't cut songs, so step boundaries
   land within roughly ±20–60s; the app shows how far each step's music ends from the step's end.
